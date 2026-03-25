@@ -248,10 +248,19 @@ function registerSingerList(app) {
       '-': randomKey,
       data
     }).then((response) => {
-      const data = response.data
-      if (data.code === ERR_OK) {
-        // 处理歌手列表数据
-        const singerList = data.singerList.data.singerlist
+      try {
+        const data = response.data
+        if (data.code !== ERR_OK) {
+          console.warn('[getSingerList] QQ code:', data.code)
+          res.json({ code: ERR_OK, result: { singers: [] } })
+          return
+        }
+        const singerList = data.singerList?.data?.singerlist
+        if (!Array.isArray(singerList) || !singerList.length) {
+          console.warn('[getSingerList] singerlist 为空或结构异常')
+          res.json({ code: ERR_OK, result: { singers: [] } })
+          return
+        }
 
         // 构造歌手 Map 数据结构
         const singerMap = {
@@ -262,43 +271,39 @@ function registerSingerList(app) {
         }
 
         singerList.forEach((item) => {
-          // 把歌手名转成拼音
-          const p = pinyin(item.singer_name)
-          if (!p || !p.length) {
-            return
-          }
-          // 获取歌手名拼音的首字母
-          const key = p[0][0].slice(0, 1).toUpperCase()
-          if (key) {
+          try {
+            const p = pinyin(item.singer_name)
+            if (!p || !p.length || !p[0] || p[0][0] == null) {
+              return
+            }
+            const key = String(p[0][0]).slice(0, 1).toUpperCase()
+            if (!key) {
+              return
+            }
             if (!singerMap[key]) {
               singerMap[key] = {
                 title: key,
                 list: []
               }
             }
-            // 每个字母下面会有多名歌手
             singerMap[key].list.push(map([item])[0])
+          } catch (e) {
+            console.warn('[getSingerList] 单条歌手拼音分组跳过:', e.message)
           }
         })
 
-        // 热门歌手
         const hot = []
-        // 字母歌手
         const letter = []
 
-        // 遍历处理 singerMap，让结果有序
-        for (const key in singerMap) {
-          const item = singerMap[key]
+        for (const k in singerMap) {
+          const item = singerMap[k]
           if (item.title.match(/[a-zA-Z]/)) {
             letter.push(item)
           } else if (item.title === HOT_NAME) {
             hot.push(item)
           }
         }
-        // 按字母顺序排序
-        letter.sort((a, b) => {
-          return a.title.charCodeAt(0) - b.title.charCodeAt(0)
-        })
+        letter.sort((a, b) => a.title.charCodeAt(0) - b.title.charCodeAt(0))
 
         res.json({
           code: ERR_OK,
@@ -306,9 +311,13 @@ function registerSingerList(app) {
             singers: hot.concat(letter)
           }
         })
-      } else {
-        res.json(data)
+      } catch (e) {
+        console.warn('[getSingerList] 处理异常:', e.message)
+        res.json({ code: ERR_OK, result: { singers: [] } })
       }
+    }).catch((e) => {
+      console.warn('[getSingerList] 请求失败:', e.message)
+      res.json({ code: ERR_OK, result: { singers: [] } })
     })
   })
 
@@ -450,13 +459,15 @@ function registerSongsUrl(app) {
 
     // 并行发送多个请求
     return Promise.all(requests).then(() => {
-      // 所有请求响应完毕，urlMap 也就构造完毕了
       res.json({
         code: ERR_OK,
         result: {
           map: urlMap
         }
       })
+    }).catch((e) => {
+      console.warn('[getSongsUrl] 请求失败:', e.message)
+      res.json({ code: ERR_OK, result: { map: {} } })
     })
   })
 }
