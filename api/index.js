@@ -1,16 +1,25 @@
-const express = require('express')
-const app = express()
+const express = require('express');
+const app = express();
 
-// ******** 解决跨域（必须加！Vercel 强制要求） ********
-app.all('*', function (req, res, next) {
-  res.header("Access-Control-Allow-Origin", "*")
-  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept")
-  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-  next()
-})
+// 允许所有跨域（必须写在最前面）
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
 
-// ******** 注册你的代理路由（不变） ********
-const registerRouter = require('../router')
-registerRouter(app)
+// 加载路由
+const registerRouter = require('../router');
+registerRouter(app);
 
-module.exports = app
+// 必须加这个端口监听！Vercel 有时候需要它！
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log('Server running on port ' + port);
+});
+
+module.exports = app;
