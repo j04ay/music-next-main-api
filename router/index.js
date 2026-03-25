@@ -38,6 +38,13 @@ function getUid() {
   return '' + Math.round(2147483647 * Math.random()) * t % 1e10
 }
 
+// 第三方接口常返回 http 图链，HTTPS 页面会报 Mixed Content；统一改为 https
+function ensureHttpsUrl(url) {
+  if (!url || typeof url !== 'string') return url
+  if (url.indexOf('http://') === 0) return 'https://' + url.slice(7)
+  return url
+}
+
 // 对 axios get 请求的封装
 // 修改请求的 headers 值，合并公共请求参数
 function get(url, params) {
@@ -169,7 +176,7 @@ function registerRecommend(app) {
             for (let i = 0; i < len; i++) {
               const item = focusList[i]
               if (!item) continue
-              const sliderItem = { id: item.id, pic: item.cover }
+              const sliderItem = { id: item.id, pic: ensureHttpsUrl(item.cover) }
               if (jumpPrefixMap[item.jumptype]) {
                 sliderItem.link = jumpPrefixMap[item.jumptype] + (item.subid || item.id) + '.html'
               } else if (item.jumptype === 3001) {
@@ -189,7 +196,7 @@ function registerRecommend(app) {
                 id: item.content_id,
                 username: item.username,
                 title: item.title,
-                pic: item.cover
+                pic: ensureHttpsUrl(item.cover)
               })
             }
           }
@@ -312,7 +319,7 @@ function registerSingerList(app) {
         id: item.singer_id,
         mid: item.singer_mid,
         name: item.singer_name,
-        pic: item.singer_pic.replace(/\.webp$/, '.jpg').replace('150x150', '800x800')
+        pic: ensureHttpsUrl(item.singer_pic.replace(/\.webp$/, '.jpg').replace('150x150', '800x800'))
       }
     })
   }
@@ -552,7 +559,7 @@ function registerTopList(app) {
           item.toplist.forEach((listItem) => {
             topList.push({
               id: listItem.topId,
-              pic: listItem.frontPicUrl,
+              pic: ensureHttpsUrl(listItem.frontPicUrl),
               name: listItem.title,
               period: listItem.period,
               songList: listItem.song.map((songItem) => {
