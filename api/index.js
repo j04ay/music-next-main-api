@@ -1,25 +1,38 @@
 const express = require('express');
+const cors = require('cors');
 const app = express();
 
-// 允许所有跨域（必须写在最前面）
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
-});
+// GitHub Pages 与本地开发：跨域需显式允许 Origin
+const allowedOrigins = [
+  'https://j04ay.github.io',
+  'http://localhost:8080',
+  'http://127.0.0.1:8080'
+];
 
-// 加载路由
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) {
+        return callback(null, true);
+      }
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      if (/^http:\/\/localhost:\d+$/.test(origin) || /^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
+        return callback(null, true);
+      }
+      callback(null, false);
+    },
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+  })
+);
+
+// ******** 这是写的所有路由逻辑 ********
 const registerRouter = require('../router');
+
+// ******** 关键：必须先注册路由 ********
 registerRouter(app);
 
-// 必须加这个端口监听！Vercel 有时候需要它！
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log('Server running on port ' + port);
-});
-
+// ******** Vercel 导出 ********
 module.exports = app;
