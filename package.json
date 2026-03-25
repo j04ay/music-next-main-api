@@ -4,6 +4,7 @@
   "main": "api/index.js",
   "dependencies": {
     "axios": "^0.21.1",
+    "cors": "^2.8.5",
     "express": "^4.17.3",
     "js-base64": "^3.7.2",
     "pinyin": "^2.11.0"
