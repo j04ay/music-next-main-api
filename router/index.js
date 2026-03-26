@@ -10,6 +10,8 @@ const getSecuritySign = require('../sign')
 
 const ERR_OK = 0
 const token = 5381
+const QQ_BROWSER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 // 歌曲图片加载失败时使用的默认图片
 const fallbackPicUrl = 'https://y.gtimg.cn/mediastyle/music_v11/extra/default_300x300.jpg?max_age=31536000'
@@ -47,13 +49,15 @@ function ensureHttpsUrl(url) {
 
 // 对 axios get 请求的封装
 // 修改请求的 headers 值，合并公共请求参数
-function get(url, params) {
+function get(url, params, axiosOptions) {
   return axios.get(url, {
     headers: {
       referer: 'https://y.qq.com/',
-      origin: 'https://y.qq.com/'
+      origin: 'https://y.qq.com/',
+      'User-Agent': QQ_BROWSER_UA
     },
-    params: Object.assign({}, commonParams, params)
+    params: Object.assign({}, commonParams, params),
+    ...axiosOptions
   })
 }
 
@@ -64,9 +68,22 @@ function post(url, params) {
     headers: {
       referer: 'https://y.qq.com/',
       origin: 'https://y.qq.com/',
-      'Content-Type': 'application/x-www-form-urlencoded'
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': QQ_BROWSER_UA
     }
   })
+}
+
+function parseMidListFromQuery(query) {
+  let raw = query.mid
+  if (raw === undefined && query['mid[]'] !== undefined) {
+    raw = query['mid[]']
+  }
+  if (raw === undefined) {
+    return []
+  }
+  const arr = Array.isArray(raw) ? raw : [raw]
+  return arr.filter((x) => x != null && String(x).length > 0)
 }
 
 // 处理歌曲列表
@@ -379,8 +396,7 @@ function registerSingerDetail(app) {
 // 因为歌曲的 url 每天都在变化，所以需要单独的接口根据歌曲的 mid 获取
 function registerSongsUrl(app) {
   app.get('/api/getSongsUrl', (req, res) => {
-    const midParam = req.query.mid
-    const mid = Array.isArray(midParam) ? midParam : (midParam ? [midParam] : [])
+    const mid = parseMidListFromQuery(req.query)
     if (!mid.length) {
       res.json({ code: ERR_OK, result: { map: {} } })
       return
@@ -399,19 +415,47 @@ function registerSongsUrl(app) {
     // 以歌曲的 mid 为 key，存储歌曲 URL
     const urlMap = {}
 
-    // 处理返回的 mid
-    function process(mid) {
+    function mergeVkeyResponse(body) {
+      try {
+        const data = body
+        if (!data || data.code !== ERR_OK || !data.req_0) {
+          if (data) {
+            console.warn('[getSongsUrl] QQ API code:', data.code, 'req_0:', !!data.req_0)
+          }
+          return
+        }
+        const midInfo = data.req_0.data && data.req_0.data.midurlinfo
+        const sip = data.req_0.data && data.req_0.data.sip
+        if (!midInfo || !sip || !sip.length) {
+          console.warn('[getSongsUrl] midurlinfo/sip 为空, midInfo:', !!midInfo, 'sip:', sip?.length)
+          return
+        }
+        const domain = sip[sip.length - 1]
+        midInfo.forEach((info) => {
+          if (info && info.songmid && info.purl) {
+            urlMap[info.songmid] = domain + info.purl
+          }
+        })
+      } catch (e) {
+        console.warn('[getSongsUrl] 第三方 API 返回结构异常:', e.message)
+      }
+    }
+
+    function postVkeyPayload(mids, loginflag, platform, songtypeFill) {
+      if (!mids.length) {
+        return Promise.resolve()
+      }
       const data = {
         req_0: {
           module: 'vkey.GetVkeyServer',
           method: 'CgiGetVkey',
           param: {
             guid: getUid(),
-            songmid: mid,
-            songtype: new Array(mid.length).fill(0),
+            songmid: mids,
+            songtype: new Array(mids.length).fill(songtypeFill),
             uin: '0',
-            loginflag: 0,
-            platform: '23',
+            loginflag,
+            platform,
             h5to: 'speed'
           }
         },
@@ -419,36 +463,20 @@ function registerSongsUrl(app) {
           g_tk: token,
           uin: '0',
           format: 'json',
-          platform: 'h5'
+          platform: 'h5',
+          ct: 24,
+          cv: 0
         }
       }
-
       const sign = getSecuritySign(JSON.stringify(data))
       const url = `https://u.y.qq.com/cgi-bin/musics.fcg?_=${getRandomVal()}&sign=${sign}`
+      return post(url, data).then((response) => mergeVkeyResponse(response.data))
+    }
 
-      // 发送 post 请求
-      return post(url, data).then((response) => {
-        try {
-          const data = response.data
-          if (data.code !== ERR_OK || !data.req_0) {
-            console.warn('[getSongsUrl] QQ API code:', data.code, 'req_0:', !!data.req_0)
-            return
-          }
-          const midInfo = data.req_0.data && data.req_0.data.midurlinfo
-          const sip = data.req_0.data && data.req_0.data.sip
-          if (!midInfo || !sip || !sip.length) {
-            console.warn('[getSongsUrl] midurlinfo/sip 为空, midInfo:', !!midInfo, 'sip:', sip?.length)
-            return
-          }
-          const domain = sip[sip.length - 1]
-          midInfo.forEach((info) => {
-            if (info && info.songmid && info.purl) {
-              urlMap[info.songmid] = domain + info.purl
-            }
-          })
-        } catch (e) {
-          console.warn('[getSongsUrl] 第三方 API 返回结构异常:', e.message)
-        }
+    function process(midBatch) {
+      return postVkeyPayload(midBatch, 1, '20', 1).then(() => {
+        const missing = midBatch.filter((m) => !urlMap[m])
+        return postVkeyPayload(missing, 0, '23', 0)
       })
     }
 
@@ -475,26 +503,57 @@ function registerSongsUrl(app) {
 // 注册歌词接口
 function registerLyric(app) {
   app.get('/api/getLyric', (req, res) => {
+    const mids = parseMidListFromQuery(req.query)
+    const songmid = mids[0]
+    if (!songmid) {
+      res.json({ code: ERR_OK, result: { lyric: '[00:00:00]缺少 song mid' } })
+      return
+    }
     const url = 'https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg'
 
-    get(url, {
-      '-': 'MusicJsonCallback_lrc',
-      pcachetime: +new Date(),
-      songmid: req.query.mid,
-      g_tk_new_20200303: token
-    }).then((response) => {
-      const data = response.data
-      if (data.code === ERR_OK) {
-        res.json({
-          code: ERR_OK,
-          result: {
-            lyric: Base64.decode(data.lyric)
+    get(
+      url,
+      {
+        '-': 'MusicJsonCallback_lrc',
+        pcachetime: +new Date(),
+        songmid,
+        g_tk_new_20200303: token
+      },
+      { responseType: 'text' }
+    )
+      .then((response) => {
+        let raw = response.data
+        let data = raw
+        if (typeof raw === 'string') {
+          const i = raw.indexOf('{')
+          const j = raw.lastIndexOf('}')
+          if (i !== -1 && j > i) {
+            try {
+              data = JSON.parse(raw.slice(i, j + 1))
+            } catch (e) {
+              console.warn('[getLyric] JSON 解析失败:', e.message)
+            }
           }
-        })
-      } else {
-        res.json(data)
-      }
-    })
+        }
+        if (data && data.code === ERR_OK && data.lyric != null) {
+          res.json({
+            code: ERR_OK,
+            result: {
+              lyric: Base64.decode(data.lyric)
+            }
+          })
+        } else {
+          res.json(
+            data && typeof data === 'object'
+              ? data
+              : { code: -1, message: 'lyric parse failed' }
+          )
+        }
+      })
+      .catch((e) => {
+        console.warn('[getLyric] 请求失败:', e.message)
+        res.json({ code: ERR_OK, result: { lyric: '[00:00:00]歌词暂时无法获取' } })
+      })
   })
 }
 
