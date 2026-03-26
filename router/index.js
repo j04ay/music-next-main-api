@@ -49,6 +49,35 @@ function ensureHttpsUrl(url) {
   return url
 }
 
+function normalizeStreamBase(s) {
+  if (!s || typeof s !== 'string') return ''
+  let u = s.trim()
+  if (u.indexOf('http://') === 0) u = 'https://' + u.slice(7)
+  return u.endsWith('/') ? u.slice(0, -1) : u
+}
+
+/** 从单条 midurlinfo + CDN 域名拼播放地址（含 purl 为空时用 filename+vkey 的常见回退） */
+function buildSongStreamUrl(info, base) {
+  if (!info || !info.songmid || !base) return ''
+  if (info.purl) {
+    const p = info.purl
+    if (p.indexOf('http://') === 0 || p.indexOf('https://') === 0) {
+      return ensureHttpsUrl(p)
+    }
+    const path = p.startsWith('/') ? p : '/' + p
+    return ensureHttpsUrl(base + path)
+  }
+  const fn = info.filename || (info.songmid ? `C400${info.songmid}.m4a` : '')
+  const vk = info.vkey || info.wifivkey || info.loginkey
+  if (fn && vk) {
+    const path = fn.startsWith('/') ? fn : '/' + fn
+    return ensureHttpsUrl(
+      `${base}${path}?vkey=${encodeURIComponent(vk)}&guid=${getUid()}&fromtag=120`
+    )
+  }
+  return ''
+}
+
 // 对 axios get 请求的封装
 // 修改请求的 headers 值，合并公共请求参数
 function get(url, params, axiosOptions) {
@@ -403,18 +432,13 @@ function registerSongsUrl(app) {
       res.json({ code: ERR_OK, result: { map: {} } })
       return
     }
-    let midGroup = []
-    // 第三方接口只支持最多处理 100 条数据，所以如果超过 100 条数据，我们要把数据按每组 100 条切割，发送多个请求
-    if (mid.length > 100) {
-      const groupLen = Math.ceil(mid.length / 100)
-      for (let i = 0; i < groupLen; i++) {
-        midGroup.push(mid.slice(i * 100, (100 * (i + 1))))
-      }
-    } else {
-      midGroup = [mid]
+    // 单次请求最多 100 条；小批量（如 8 条）在海外/风控下比一次拉满更容易拿到 purl
+    const VKEY_CHUNK = 8
+    const midGroup = []
+    for (let i = 0; i < mid.length; i += VKEY_CHUNK) {
+      midGroup.push(mid.slice(i, Math.min(i + VKEY_CHUNK, mid.length)))
     }
 
-    // 以歌曲的 mid 为 key，存储歌曲 URL
     const urlMap = {}
 
     function mergeVkeyResponse(body) {
@@ -426,16 +450,30 @@ function registerSongsUrl(app) {
           }
           return
         }
+        if (data.req_0.code !== undefined && data.req_0.code !== 0) {
+          console.warn('[getSongsUrl] req_0.code:', data.req_0.code)
+          return
+        }
         const midInfo = data.req_0.data && data.req_0.data.midurlinfo
         const sip = data.req_0.data && data.req_0.data.sip
         if (!midInfo || !sip || !sip.length) {
           console.warn('[getSongsUrl] midurlinfo/sip 为空, midInfo:', !!midInfo, 'sip:', sip?.length)
           return
         }
-        const domain = sip[sip.length - 1]
         midInfo.forEach((info) => {
-          if (info && info.songmid && info.purl) {
-            urlMap[info.songmid] = domain + info.purl
+          if (!info || !info.songmid || urlMap[info.songmid]) {
+            return
+          }
+          for (let s = 0; s < sip.length; s++) {
+            const base = normalizeStreamBase(sip[s])
+            if (!base) {
+              continue
+            }
+            const u = buildSongStreamUrl(info, base)
+            if (u) {
+              urlMap[info.songmid] = u
+              break
+            }
           }
         })
       } catch (e) {
@@ -443,23 +481,26 @@ function registerSongsUrl(app) {
       }
     }
 
-    function postVkeyPayload(mids, loginflag, platform, songtypeFill) {
+    function postVkeyPayload(mids, loginflag, platform, songtypeFill, opts = {}) {
       if (!mids.length) {
         return Promise.resolve()
+      }
+      const param = {
+        guid: getUid(),
+        songmid: mids,
+        songtype: new Array(mids.length).fill(songtypeFill),
+        uin: '0',
+        loginflag,
+        platform
+      }
+      if (opts.h5to !== false) {
+        param.h5to = 'speed'
       }
       const data = {
         req_0: {
           module: 'vkey.GetVkeyServer',
           method: 'CgiGetVkey',
-          param: {
-            guid: getUid(),
-            songmid: mids,
-            songtype: new Array(mids.length).fill(songtypeFill),
-            uin: '0',
-            loginflag,
-            platform,
-            h5to: 'speed'
-          }
+          param
         },
         comm: {
           g_tk: token,
@@ -482,23 +523,41 @@ function registerSongsUrl(app) {
       })
     }
 
-    // 构造多个 Promise 请求
-    const requests = midGroup.map((mid) => {
-      return process(mid)
-    })
+    /** 对仍无地址的 mid 再逐条请求（批量易空时单条略好），避免一次请求过多拖满 Vercel 超时 */
+    function retryMissingSingles(allMids) {
+      const todo = allMids.filter((m) => !urlMap[m]).slice(0, 15)
+      return todo.reduce((chain, one) => {
+        return chain.then(() => {
+          if (urlMap[one]) {
+            return Promise.resolve()
+          }
+          return postVkeyPayload([one], 1, '20', 1)
+            .then(() => {
+              if (!urlMap[one]) return postVkeyPayload([one], 0, '23', 0)
+            })
+            .then(() => {
+              if (!urlMap[one]) return postVkeyPayload([one], 1, '20', 1, { h5to: false })
+            })
+        })
+      }, Promise.resolve())
+    }
 
-    // 并行发送多个请求
-    return Promise.all(requests).then(() => {
-      res.json({
-        code: ERR_OK,
-        result: {
-          map: urlMap
-        }
+    const requests = midGroup.map((batch) => process(batch))
+
+    return Promise.all(requests)
+      .then(() => retryMissingSingles(mid))
+      .then(() => {
+        res.json({
+          code: ERR_OK,
+          result: {
+            map: urlMap
+          }
+        })
       })
-    }).catch((e) => {
-      console.warn('[getSongsUrl] 请求失败:', e.message)
-      res.json({ code: ERR_OK, result: { map: {} } })
-    })
+      .catch((e) => {
+        console.warn('[getSongsUrl] 请求失败:', e.message)
+        res.json({ code: ERR_OK, result: { map: {} } })
+      })
   })
 }
 
